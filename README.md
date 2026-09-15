@@ -3,6 +3,10 @@
 A minimal OpenCV app that shows a mirrored webcam feed beside the matching
 hand-drawn neutral, happy, surprised, or sad character.
 
+The face crop keeps a little surrounding context, and sadness uses a gentler
+threshold when its score is close to neutral. A short persistence check reduces
+flicker without delaying every prediction through a rolling average.
+
 ## Setup (macOS)
 
 Python 3.10 is required. From this folder, run:

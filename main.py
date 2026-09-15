@@ -11,9 +11,19 @@ from hsemotion_onnx.facial_emotions import HSEmotionRecognizer
 
 WINDOW_NAME = "Webcam Expression Character"
 EXPRESSIONS = ("neutral", "happy", "surprised", "sad")
-CONFIDENCE_THRESHOLD = 0.45
+CONFIDENCE_THRESHOLD = 0.35
+SAD_CONFIDENCE_THRESHOLD = 0.18
+SAD_NEUTRAL_MARGIN = 0.18
+FACE_PADDING = 0.18
 SWITCH_DELAY_SECONDS = 0.30
 INFERENCE_INTERVAL_SECONDS = 0.12
+
+MODEL_SCORE_INDEX = {
+    "happy": 4,
+    "neutral": 5,
+    "sad": 6,
+    "surprised": 7,
+}
 
 
 def load_characters(base_dir: Path) -> dict[str, np.ndarray]:
@@ -44,22 +54,47 @@ def largest_face(
     return int(x), int(y), int(width), int(height)
 
 
-def classify_expression(
-    recognizer: HSEmotionRecognizer, face_image: np.ndarray
-) -> tuple[str, float]:
-    """Convert the model's eight classes into the four drawing states."""
-    model_label, scores = recognizer.predict_emotions(face_image, logits=False)
-    confidence = float(np.max(scores))
-    label_map = {
-        "neutral": "neutral",
-        "happiness": "happy",
-        "surprise": "surprised",
-        "sadness": "sad",
+def padded_face(frame: np.ndarray, box: tuple[int, int, int, int]) -> np.ndarray:
+    """Crop a face with context for eyebrows, cheeks, and jawline."""
+    x, y, width, height = box
+    padding_x = round(width * FACE_PADDING)
+    padding_y = round(height * FACE_PADDING)
+    left = max(0, x - padding_x)
+    top = max(0, y - padding_y)
+    right = min(frame.shape[1], x + width + padding_x)
+    bottom = min(frame.shape[0], y + height + padding_y)
+    return frame[top:bottom, left:right]
+
+
+def expression_from_scores(scores: np.ndarray) -> tuple[str, float]:
+    """Choose among the four drawing states, with a gentler sadness rule."""
+    target_scores = {
+        expression: float(scores[index])
+        for expression, index in MODEL_SCORE_INDEX.items()
     }
-    expression = label_map.get(model_label.lower(), "neutral")
-    if confidence < CONFIDENCE_THRESHOLD:
-        expression = "neutral"
+    expression = max(target_scores, key=target_scores.get)
+
+    sad_score = target_scores["sad"]
+    neutral_score = target_scores["neutral"]
+    if (
+        expression in ("neutral", "sad")
+        and sad_score >= SAD_CONFIDENCE_THRESHOLD
+        and sad_score >= neutral_score - SAD_NEUTRAL_MARGIN
+    ):
+        return "sad", sad_score
+
+    confidence = target_scores[expression]
+    if expression not in ("neutral", "sad") and confidence < CONFIDENCE_THRESHOLD:
+        return "neutral", confidence
     return expression, confidence
+
+
+def predict_scores(
+    recognizer: HSEmotionRecognizer, face_image: np.ndarray
+) -> np.ndarray:
+    """Return the model's eight expression probabilities."""
+    _, scores = recognizer.predict_emotions(face_image, logits=False)
+    return np.asarray(scores, dtype=np.float32)
 
 
 def update_stable_expression(
@@ -133,10 +168,8 @@ def run() -> None:
                     current, pending, pending_since = "neutral", None, 0.0
                     confidence = 0.0
                 else:
-                    x, y, width, height = face_box
-                    predicted, confidence = classify_expression(
-                        recognizer, frame[y : y + height, x : x + width]
-                    )
+                    scores = predict_scores(recognizer, padded_face(frame, face_box))
+                    predicted, confidence = expression_from_scores(scores)
                     current, pending, pending_since = update_stable_expression(
                         current, pending, pending_since, predicted, now
                     )
